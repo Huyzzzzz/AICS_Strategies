@@ -38,20 +38,21 @@
         "ccxt_config": {},
         "ccxt_async_config": {},
         "pair_whitelist": [
+            "ICP/USDT"
         ],
         "pair_blacklist": [
             "BNB/.*"
         ]
     },
-    "pairlists": [
-        {
-            "method": "VolumePairList",
-            "number_assets": 20,
-            "sort_key": "quoteVolume",
-            "min_value": 0,
-            "refresh_period": 1800
-        }
-    ],
+    "pairlists": [ //Trình xử lý các cặp tiền 
+        { 
+        "method": "VolumePairList", //  Tên phương pháp được lựa chọn. Phương pháp này tiến hành sắp xếp/ lọc các cặp tiền theo khối lượng giao dịch của chúng 
+        "number_assets": 20, //  Số cặp tiền được lọc ra 
+        "sort_key": "quoteVolume", //  Tiêu chí để sắp xếp: số lượng tiền điện tử được giao dịch (mua hoặc bán) trong 24h qua 
+        "min_value": 0, //  Các cặp tiền có khối lượng giao dịch nhỏ hơn min_value sẽ bị lọc ra  
+        "refresh_period": 1800//  Khoảng thời gian các cặp tiền được làm mới 
+        } 
+    ], 
     "telegram": {
         "enabled": false,
         "token": "",
