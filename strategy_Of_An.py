@@ -108,18 +108,8 @@ class strategy_Of_An(IStrategy):
         :return: a Dataframe with all mandatory indicators for the strategies
         """
         # Calculate max & min trendline
-        if not self.dp:
-            return dataframe
-        
-        inf_tf = "1d"
-        # Get the informative pair
-        informative = self.dp.get_pair_dataframe(pair=metadata['pair'], timeframe=inf_tf) 
-
-        # Calculate max line and min line in 1d timeframe
-        informative['maxline_1d'] = gentrends(dataframe=informative, previous_candles=100)['Max Line']
-        informative['minline_1d'] = gentrends(dataframe=informative, previous_candles=100)['Min Line']
-
-        dataframe = merge_informative_pair(dataframe, informative, self.timeframe, inf_tf, ffill=True)
+        gentrends(dataframe=dataframe, previous_candles=100)
+        gentrends(dataframe=dataframe, previous_candles=100)
 
         return dataframe
 
@@ -132,15 +122,15 @@ class strategy_Of_An(IStrategy):
         """
         dataframe.loc[
             (
-                (dataframe['close_1d'] <= dataframe['maxline_1d']) &
-                (dataframe['close_1d'].shift(1) > dataframe['maxline_1d'].shift(1))  
+                (dataframe['close'] >= dataframe['maxline']) &
+                (dataframe['close'].shift(1) > dataframe['maxline'].shift(1))  
             ),
             ['enter_long', 'enter_tag']] = (1, 'max_line_cross')
 
         dataframe.loc[
             (
-                (dataframe['close_1d'] >= dataframe['minline_1d']) &
-                (dataframe['close_1d'].shift(1) < dataframe['minline_1d'].shift(1)) 
+                (dataframe['close'] <= dataframe['minline']) &
+                (dataframe['close'].shift(1) < dataframe['minline'].shift(1)) 
             ),
             ['enter_short', 'enter_tag']] = (1, 'min_line_cross')
 
@@ -221,8 +211,8 @@ class strategy_Of_An(IStrategy):
         """
         # x = dataframe[field][-100:]
         # x = np.array(x)
-        df_high = np.array(dataframe["high_1d"][-previous_candles:])
-        df_low = np.array(dataframe["low_1d"][-previous_candles:])
+        df_high = np.array(dataframe["high"][-previous_candles:])
+        df_low = np.array(dataframe["low"][-previous_candles:])
 
         top_three_high = find_top_k_max_elements(df_high, 3) # indices of three max
         bottom_three_low = find_bottom_k_min_elements(df_low, 3) # indices of three min
@@ -243,16 +233,9 @@ class strategy_Of_An(IStrategy):
         max_slope, max_intercept = find_best_fit_line(max_points)
         min_slope, min_intercept = find_best_fit_line(min_points)
 
-        maxline = np.array([(max_intercept + max_slope * max) for max in range(len(df_high))])
-        minline = np.array([(min_intercept + min_slope * min) for min in range(len(df_high))])
+        maxline = np.array([(max_intercept + max_slope * max) for max in range(len(dataframe['high']))])
+        minline = np.array([(min_intercept + min_slope * min) for min in range(len(dataframe['low']))])
 
         # OUTPUT
         dataframe.loc[dataframe.index[-previous_candles:], "maxline"] = maxline
         dataframe.loc[dataframe.index[-previous_candles:], "minline"] = minline
-
-        trends = np.transpose(np.array((df_high, df_low, maxline, minline)))
-        trends = pd.DataFrame(
-            trends, index=np.arange(0, len(df_high)), columns=["High", "Low", "Max Line", "Min Line"]
-        )
-
-        return trends
