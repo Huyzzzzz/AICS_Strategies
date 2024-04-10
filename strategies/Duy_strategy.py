@@ -43,14 +43,12 @@ class Duy_startegy(IStrategy):
     timeframe = '5m'
 
     # Can this strategy go short?
-    can_short: bool = False
+    can_short: bool = True
 
     # Minimal ROI designed for the strategy.
     # This attribute will be overridden if the config file contains "minimal_roi".
     minimal_roi = {
-        "60": 0.01,
-        "30": 0.02,
-        "0": 0.04
+        "0": 1
     }
 
     # Optimal stoploss designed for the strategy.
@@ -68,15 +66,17 @@ class Duy_startegy(IStrategy):
 
     # These values can be overridden in the config.
     use_exit_signal = True
-    exit_profit_only = False
+    exit_profit_only = True
     ignore_roi_if_entry_signal = False
 
     # Number of candles the strategy requires before producing valid signals
-    startup_candle_count: int = 30
+    startup_candle_count: int = 100
 
+    """
     # Strategy parameters
     buy_rsi = IntParameter(10, 40, default=30, space="buy")
     sell_rsi = IntParameter(60, 90, default=70, space="sell")
+    """
 
     # Optional order type mapping.
     order_types = {
@@ -91,26 +91,6 @@ class Duy_startegy(IStrategy):
         'entry': 'GTC',
         'exit': 'GTC'
     }
-    
-    @property
-    def plot_config(self):
-        return {
-            # Main plot indicators (Moving averages, ...)
-            'main_plot': {
-                'tema': {},
-                'sar': {'color': 'white'},
-            },
-            'subplots': {
-                # Subplots - each dict defines one additional plot
-                "MACD": {
-                    'macd': {'color': 'blue'},
-                    'macdsignal': {'color': 'orange'},
-                },
-                "RSI": {
-                    'rsi': {'color': 'red'},
-                }
-            }
-        }
 
     def informative_pairs(self):
         """
@@ -123,7 +103,7 @@ class Duy_startegy(IStrategy):
                             ("BTC/USDT", "15m"),
                             ]
         """
-        return []
+        return ["BTC/USDT", "1h"]
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
@@ -137,201 +117,111 @@ class Duy_startegy(IStrategy):
         :return: a Dataframe with all mandatory indicators for the strategies
         """
         
-        # Momentum Indicators
-        # ------------------------------------
+        if not self.dp:
+            # Don't do anything if DataProvider is not available.
+            return dataframe
 
-        # ADX
-        dataframe['adx'] = ta.ADX(dataframe)
+        #### TREND ####
+        inf_tf = '1h'
+        informative = self.dp.get_pair_dataframe(pair=metadata['pair'], timeframe=inf_tf)    
+        # Get the 200 hour EMA
+        informative['ema200'] = ta.EMA(informative, timeperiod=200)
+        
+        # Use the helper function merge_informative_pair to safely merge the pair
+        # Automatically renames the columns and merges a shorter timeframe dataframe and a longer timeframe informative pair
+        # use ffill to have the 1d value available in every row throughout the day.
+        # Without this, comparisons between columns of the original and the informative pair would only work once per day
+        dataframe = merge_informative_pair(dataframe, informative, self.timeframe, inf_tf, ffill=True)
 
-        # # Plus Directional Indicator / Movement
-        # dataframe['plus_dm'] = ta.PLUS_DM(dataframe)
-        # dataframe['plus_di'] = ta.PLUS_DI(dataframe)
+        #### AREA OF VALUE & ENTRY TRIGER ####
+        # Tìm ra các điểm max, min theo từng cụm 12 nến
+        max_of_high_prices, max_indices_of_high_prices, min_of_low_prices, min_indices_of_low_prices = self.process_data(dataframe, number_candle_to_process=12)
+        
+        # Find lower & upper trendlines dựa trên các indices của max high và min low tìm được 
+        slicing_window_size = 50
+        distance = 25
 
-        # # Minus Directional Indicator / Movement
-        # dataframe['minus_dm'] = ta.MINUS_DM(dataframe)
-        # dataframe['minus_di'] = ta.MINUS_DI(dataframe)
+        # Upper trendline
+        max_values_dataframe = pd.DataFrame(data=max_of_high_prices.values, index=max_indices_of_high_prices, columns=['max_high'])
+        max_values_dataframe = self.upper_trendlines(dataframe=max_values_dataframe, slicing_window=slicing_window_size, distance=distance)
 
-        # # Aroon, Aroon Oscillator
-        # aroon = ta.AROON(dataframe)
-        # dataframe['aroonup'] = aroon['aroonup']
-        # dataframe['aroondown'] = aroon['aroondown']
-        # dataframe['aroonosc'] = ta.AROONOSC(dataframe)
+        # Lower trendline
+        min_values_dataframe = pd.DataFrame(data=min_of_low_prices.values, index=min_indices_of_low_prices, columns=['min_low'])
+        min_values_dataframe = self.lower_trendlines(dataframe=min_values_dataframe, slicing_window=slicing_window_size, distance=distance)
 
-        # # Awesome Oscillator
-        # dataframe['ao'] = qtpylib.awesome_oscillator(dataframe)
+        # Merge in to dataframe
+        dataframe['maxslope']= None
+        dataframe.loc[max_values_dataframe.index, 'maxslope'] = max_values_dataframe['maxslope']
 
-        # # Keltner Channel
-        # keltner = qtpylib.keltner_channel(dataframe)
-        # dataframe["kc_upperband"] = keltner["upper"]
-        # dataframe["kc_lowerband"] = keltner["lower"]
-        # dataframe["kc_middleband"] = keltner["mid"]
-        # dataframe["kc_percent"] = (
-        #     (dataframe["close"] - dataframe["kc_lowerband"]) /
-        #     (dataframe["kc_upperband"] - dataframe["kc_lowerband"])
-        # )
-        # dataframe["kc_width"] = (
-        #     (dataframe["kc_upperband"] - dataframe["kc_lowerband"]) / dataframe["kc_middleband"]
-        # )
+        dataframe['max_y_intercept'] = None
+        dataframe.loc[max_values_dataframe.index, 'max_y_intercept'] = max_values_dataframe['max_y_intercept']
 
-        # # Ultimate Oscillator
-        # dataframe['uo'] = ta.ULTOSC(dataframe)
+        dataframe['minslope']= None
+        dataframe.loc[min_values_dataframe.index, 'minslope'] = min_values_dataframe['minslope']
 
-        # # Commodity Channel Index: values [Oversold:-100, Overbought:100]
-        # dataframe['cci'] = ta.CCI(dataframe)
+        dataframe['min_y_intercept'] = None
+        dataframe.loc[min_values_dataframe.index, 'min_y_intercept'] = min_values_dataframe['min_y_intercept']
 
-        # RSI
-        dataframe['rsi'] = ta.RSI(dataframe)
+        # Group candles by year, month, day, and hour
+        grouped = dataframe.groupby([dataframe['date'].dt.year, dataframe['date'].dt.month, dataframe['date'].dt.day, dataframe['date'].dt.hour])
 
-        # # Inverse Fisher transform on RSI: values [-1.0, 1.0] (https://goo.gl/2JGGoy)
-        # rsi = 0.1 * (dataframe['rsi'] - 50)
-        # dataframe['fisher_rsi'] = (np.exp(2 * rsi) - 1) / (np.exp(2 * rsi) + 1)
+        # Apply the function to each group and concatenate the results
+        dataframe = grouped.apply(self.fill_non_none).reset_index(drop=True)
 
-        # # Inverse Fisher transform on RSI normalized: values [0.0, 100.0] (https://goo.gl/2JGGoy)
-        # dataframe['fisher_rsi_norma'] = 50 * (dataframe['fisher_rsi'] + 1)
+        # Detect resistances and supports
+        thresold = self.mean_absolute_deviation(dataframe)
+        supports, resistances = self.supports_and_resistances(dataframe, 50, field_for_support='low', field_for_resistance='high')
+        dataframe['Support'] = None
+        dataframe.loc[supports.index, "Support"] = supports.values
+        dataframe['Resistance'] = None
+        dataframe.loc[resistances.index, "Resistance"] = resistances.values
+        
+        # Shift values of maxslope, minslope, max_y_intercept, min_y_intercept of previous hour to prior hour
+        dataframe['previous_maxslope'] = dataframe['maxslope'].shift(12)
+        dataframe['previous_minslope'] = dataframe['minslope'].shift(12)
+        dataframe['previous_max_y_intercept'] = dataframe['max_y_intercept'].shift(12)
+        dataframe['previous_min_y_intercept'] = dataframe['min_y_intercept'].shift(12)
 
-        # # Stochastic Slow
-        # stoch = ta.STOCH(dataframe)
-        # dataframe['slowd'] = stoch['slowd']
-        # dataframe['slowk'] = stoch['slowk']
+        # Xét từng nến để tìm các đỉnh/đáy, vùng kháng cự/ hỗ trợ gần nhất
+        dataframe['nearest_support'] = None
+        dataframe['nearest_resistance'] = None
+        dataframe['nearest_peak'] = None
+        dataframe['nearest_bottom'] = None
 
-        # Stochastic Fast
-        stoch_fast = ta.STOCHF(dataframe)
-        dataframe['fastd'] = stoch_fast['fastd']
-        dataframe['fastk'] = stoch_fast['fastk']
+        # Duyệt qua từng hàng trong DataFrame
+        for i in range(len(dataframe)):
 
-        # # Stochastic RSI
-        # Please read https://github.com/freqtrade/freqtrade/issues/2961 before using this.
-        # STOCHRSI is NOT aligned with tradingview, which may result in non-expected results.
-        # stoch_rsi = ta.STOCHRSI(dataframe)
-        # dataframe['fastd_rsi'] = stoch_rsi['fastd']
-        # dataframe['fastk_rsi'] = stoch_rsi['fastk']
+            # Lấy giá đóng cửa của nến hiện tại
+            close_price = dataframe.loc[i, 'close']
 
-        # MACD
-        macd = ta.MACD(dataframe)
-        dataframe['macd'] = macd['macd']
-        dataframe['macdsignal'] = macd['macdsignal']
-        dataframe['macdhist'] = macd['macdhist']
 
-        # MFI
-        dataframe['mfi'] = ta.MFI(dataframe)
+            # Tìm chỉ số (indice) của mức hỗ trợ và mức kháng cự gần nhất
+            nearest_bottom = supports[supports.index < i]
+            if len(nearest_bottom) != 0:
+                dataframe.loc[i, 'nearest_bottom'] = nearest_bottom[nearest_bottom.index.max()]
 
-        # # ROC
-        # dataframe['roc'] = ta.ROC(dataframe)
+            
+            nearest_peak = resistances[resistances.index < i]
+            if len(nearest_peak) != 0:
+                dataframe.loc[i, 'nearest_peak'] = nearest_peak[nearest_peak.index.max()]
+            
 
-        # Overlap Studies
-        # ------------------------------------
+            # Tìm mức hỗ trợ gần nhất (nhỏ hơn giá đóng cửa của nến)
+            nearest_support_index = nearest_bottom[nearest_bottom.values < close_price].index.max()
+            if not pd.isna(nearest_support_index):
+                dataframe.loc[i, 'nearest_support'] = nearest_bottom[nearest_support_index]
+            
 
-        # Bollinger Bands
-        bollinger = qtpylib.bollinger_bands(qtpylib.typical_price(dataframe), window=20, stds=2)
-        dataframe['bb_lowerband'] = bollinger['lower']
-        dataframe['bb_middleband'] = bollinger['mid']
-        dataframe['bb_upperband'] = bollinger['upper']
-        dataframe["bb_percent"] = (
-            (dataframe["close"] - dataframe["bb_lowerband"]) /
-            (dataframe["bb_upperband"] - dataframe["bb_lowerband"])
-        )
-        dataframe["bb_width"] = (
-            (dataframe["bb_upperband"] - dataframe["bb_lowerband"]) / dataframe["bb_middleband"]
-        )
+            # Tìm mức kháng cự gần nhất (lớn hơn giá đóng cửa của nến)
+            nearest_resistance_index = nearest_peak[nearest_peak.values > close_price].index.max()
+            if not pd.isna(nearest_resistance_index):
+                dataframe.loc[i, 'nearest_resistance'] = nearest_peak[nearest_resistance_index]
 
-        # Bollinger Bands - Weighted (EMA based instead of SMA)
-        # weighted_bollinger = qtpylib.weighted_bollinger_bands(
-        #     qtpylib.typical_price(dataframe), window=20, stds=2
-        # )
-        # dataframe["wbb_upperband"] = weighted_bollinger["upper"]
-        # dataframe["wbb_lowerband"] = weighted_bollinger["lower"]
-        # dataframe["wbb_middleband"] = weighted_bollinger["mid"]
-        # dataframe["wbb_percent"] = (
-        #     (dataframe["close"] - dataframe["wbb_lowerband"]) /
-        #     (dataframe["wbb_upperband"] - dataframe["wbb_lowerband"])
-        # )
-        # dataframe["wbb_width"] = (
-        #     (dataframe["wbb_upperband"] - dataframe["wbb_lowerband"]) / dataframe["wbb_middleband"]
-        # )
-
-        # # EMA - Exponential Moving Average
-        # dataframe['ema3'] = ta.EMA(dataframe, timeperiod=3)
-        # dataframe['ema5'] = ta.EMA(dataframe, timeperiod=5)
-        # dataframe['ema10'] = ta.EMA(dataframe, timeperiod=10)
-        # dataframe['ema21'] = ta.EMA(dataframe, timeperiod=21)
-        # dataframe['ema50'] = ta.EMA(dataframe, timeperiod=50)
-        # dataframe['ema100'] = ta.EMA(dataframe, timeperiod=100)
-
-        # # SMA - Simple Moving Average
-        # dataframe['sma3'] = ta.SMA(dataframe, timeperiod=3)
-        # dataframe['sma5'] = ta.SMA(dataframe, timeperiod=5)
-        # dataframe['sma10'] = ta.SMA(dataframe, timeperiod=10)
-        # dataframe['sma21'] = ta.SMA(dataframe, timeperiod=21)
-        # dataframe['sma50'] = ta.SMA(dataframe, timeperiod=50)
-        # dataframe['sma100'] = ta.SMA(dataframe, timeperiod=100)
-
-        # Parabolic SAR
-        dataframe['sar'] = ta.SAR(dataframe)
-
-        # TEMA - Triple Exponential Moving Average
-        dataframe['tema'] = ta.TEMA(dataframe, timeperiod=9)
-
-        # Cycle Indicator
-        # ------------------------------------
-        # Hilbert Transform Indicator - SineWave
-        hilbert = ta.HT_SINE(dataframe)
-        dataframe['htsine'] = hilbert['sine']
-        dataframe['htleadsine'] = hilbert['leadsine']
-
-        # Pattern Recognition - Bullish candlestick patterns
-        # ------------------------------------
-        # # Hammer: values [0, 100]
-        # dataframe['CDLHAMMER'] = ta.CDLHAMMER(dataframe)
-        # # Inverted Hammer: values [0, 100]
-        # dataframe['CDLINVERTEDHAMMER'] = ta.CDLINVERTEDHAMMER(dataframe)
-        # # Dragonfly Doji: values [0, 100]
-        # dataframe['CDLDRAGONFLYDOJI'] = ta.CDLDRAGONFLYDOJI(dataframe)
-        # # Piercing Line: values [0, 100]
-        # dataframe['CDLPIERCING'] = ta.CDLPIERCING(dataframe) # values [0, 100]
-        # # Morningstar: values [0, 100]
-        # dataframe['CDLMORNINGSTAR'] = ta.CDLMORNINGSTAR(dataframe) # values [0, 100]
-        # # Three White Soldiers: values [0, 100]
-        # dataframe['CDL3WHITESOLDIERS'] = ta.CDL3WHITESOLDIERS(dataframe) # values [0, 100]
-
-        # Pattern Recognition - Bearish candlestick patterns
-        # ------------------------------------
-        # # Hanging Man: values [0, 100]
-        # dataframe['CDLHANGINGMAN'] = ta.CDLHANGINGMAN(dataframe)
-        # # Shooting Star: values [0, 100]
-        # dataframe['CDLSHOOTINGSTAR'] = ta.CDLSHOOTINGSTAR(dataframe)
-        # # Gravestone Doji: values [0, 100]
-        # dataframe['CDLGRAVESTONEDOJI'] = ta.CDLGRAVESTONEDOJI(dataframe)
-        # # Dark Cloud Cover: values [0, 100]
-        # dataframe['CDLDARKCLOUDCOVER'] = ta.CDLDARKCLOUDCOVER(dataframe)
-        # # Evening Doji Star: values [0, 100]
-        # dataframe['CDLEVENINGDOJISTAR'] = ta.CDLEVENINGDOJISTAR(dataframe)
-        # # Evening Star: values [0, 100]
-        # dataframe['CDLEVENINGSTAR'] = ta.CDLEVENINGSTAR(dataframe)
-
-        # Pattern Recognition - Bullish/Bearish candlestick patterns
-        # ------------------------------------
-        # # Three Line Strike: values [0, -100, 100]
-        # dataframe['CDL3LINESTRIKE'] = ta.CDL3LINESTRIKE(dataframe)
-        # # Spinning Top: values [0, -100, 100]
-        # dataframe['CDLSPINNINGTOP'] = ta.CDLSPINNINGTOP(dataframe) # values [0, -100, 100]
-        # # Engulfing: values [0, -100, 100]
-        # dataframe['CDLENGULFING'] = ta.CDLENGULFING(dataframe) # values [0, -100, 100]
-        # # Harami: values [0, -100, 100]
-        # dataframe['CDLHARAMI'] = ta.CDLHARAMI(dataframe) # values [0, -100, 100]
-        # # Three Outside Up/Down: values [0, -100, 100]
-        # dataframe['CDL3OUTSIDE'] = ta.CDL3OUTSIDE(dataframe) # values [0, -100, 100]
-        # # Three Inside Up/Down: values [0, -100, 100]
-        # dataframe['CDL3INSIDE'] = ta.CDL3INSIDE(dataframe) # values [0, -100, 100]
-
-        # # Chart type
-        # # ------------------------------------
-        # # Heikin Ashi Strategy
-        # heikinashi = qtpylib.heikinashi(dataframe)
-        # dataframe['ha_open'] = heikinashi['open']
-        # dataframe['ha_close'] = heikinashi['close']
-        # dataframe['ha_high'] = heikinashi['high']
-        # dataframe['ha_low'] = heikinashi['low']
-
+        # Xét từng nến để tìm các đỉnh/đáy, vùng kháng cự/ hỗ trợ gần nhất
+        dataframe['previous_nearest_support'] = dataframe['nearest_support'].shift(1)
+        dataframe['previous_nearest_resistance'] = dataframe['nearest_resistance'].shift(1)
+        dataframe['previous_nearest_peak'] = dataframe['nearest_peak'].shift(1)
+        dataframe['previous_nearest_bottom'] = dataframe['nearest_bottom'].shift(1)
         # Retrieve best bid and best ask from the orderbook
         # ------------------------------------
         """
@@ -354,23 +244,24 @@ class Duy_startegy(IStrategy):
         """
         dataframe.loc[
             (
-                (qtpylib.crossed_above(dataframe['rsi'], self.buy_rsi.value)) &  # Signal: RSI crosses above buy_rsi
-                (dataframe['tema'] <= dataframe['bb_middleband']) &  # Guard: tema below BB middle
-                (dataframe['tema'] > dataframe['tema'].shift(1)) &  # Guard: tema is raising
-                (dataframe['volume'] > 0)  # Make sure Volume is not 0
+                (
+                    dataframe['close'] > dataframe['previous_maxslope'] * dataframe['close'].index + dataframe['previous_max_y_intercept']
+                ) &
+                (   dataframe['close_1h'] > dataframe['ema200_1h']) 
             ),
-            'enter_long'] = 1
-        # Uncomment to use shorts (Only used in futures/margin mode. Check the documentation for more info)
-        """
+            'enter_long',
+        ] = 1
+        
+        
         dataframe.loc[
             (
-                (qtpylib.crossed_above(dataframe['rsi'], self.sell_rsi.value)) &  # Signal: RSI crosses above sell_rsi
-                (dataframe['tema'] > dataframe['bb_middleband']) &  # Guard: tema above BB middle
-                (dataframe['tema'] < dataframe['tema'].shift(1)) &  # Guard: tema is falling
-                (dataframe['volume'] > 0)  # Make sure Volume is not 0
+                (
+                    dataframe['close'] < dataframe['previous_minslope'] * dataframe['close'].index + dataframe['previous_min_y_intercept']
+                ) &
+                (   dataframe['close_1h'] < dataframe['ema200_1h']) 
             ),
-            'enter_short'] = 1
-        """
+            "enter_short",
+        ] = 1
 
         return dataframe
 
@@ -381,325 +272,172 @@ class Duy_startegy(IStrategy):
         :param metadata: Additional information, like the currently traded pair
         :return: DataFrame with exit columns populated
         """
+
         dataframe.loc[
             (
-                (qtpylib.crossed_above(dataframe['rsi'], self.sell_rsi.value)) &  # Signal: RSI crosses above sell_rsi
-                (dataframe['tema'] > dataframe['bb_middleband']) &  # Guard: tema above BB middle
-                (dataframe['tema'] < dataframe['tema'].shift(1)) &  # Guard: tema is falling
-                (dataframe['volume'] > 0)  # Make sure Volume is not 0
+                (
+                    dataframe['close'] >= dataframe['previous_nearest_resistance']
+                ) | 
+                (
+                    dataframe['close'] <= dataframe['previous_bottom']
+                ) 
             ),
             'exit_long'] = 1
         # Uncomment to use shorts (Only used in futures/margin mode. Check the documentation for more info)
-        """
         dataframe.loc[
             (
-                (qtpylib.crossed_above(dataframe['rsi'], self.buy_rsi.value)) &  # Signal: RSI crosses above buy_rsi
-                (dataframe['tema'] <= dataframe['bb_middleband']) &  # Guard: tema below BB middle
-                (dataframe['tema'] > dataframe['tema'].shift(1)) &  # Guard: tema is raising
-                (dataframe['volume'] > 0)  # Make sure Volume is not 0
+                (
+                    dataframe['close'] <= dataframe['previous_nearest_support'] 
+                ) | 
+                (   
+                    dataframe['close'] >= dataframe['previous_peak']
+                ) 
             ),
             'exit_short'] = 1
-        """
+        
         return dataframe
     
-    def bot_loop_start(self, current_time: datetime, **kwargs) -> None:
+    """
+    Put other function for our own strategy in here
+    """
+
+    # Define a function to fill non-None values within each group
+    def fill_non_none(self, group):
+        non_none_values = group.dropna(subset=['maxslope', 'max_y_intercept', 'minslope', 'min_y_intercept'], how='all')
+        if not non_none_values.empty:
+            if non_none_values['maxslope'].notnull().any():
+                group['maxslope'] = non_none_values['maxslope'].dropna().iloc[0]
+            if non_none_values['max_y_intercept'].notnull().any():
+                group['max_y_intercept'] = non_none_values['max_y_intercept'].dropna().iloc[0]
+            if non_none_values['minslope'].notnull().any():
+                group['minslope'] = non_none_values['minslope'].dropna().iloc[0]
+            if non_none_values['min_y_intercept'].notnull().any():
+                group['min_y_intercept'] = non_none_values['min_y_intercept'].dropna().iloc[0]
+        return group
+
+
+    def find_second_peak(self, window_data, distance):
+        true_index = pd.Series(window_data.index.copy(), name='true_index')
+        max_high = pd.Series(window_data.values.copy(), name='max_high')
+        df_window_data = pd.DataFrame({'true_index': true_index, 'max_high': max_high})
+
+        peak1_idx = df_window_data['max_high'].idxmax()
+        if peak1_idx + distance >= len(df_window_data):    
+            peak2_idx = df_window_data.loc[: (peak1_idx - distance + 1), 'max_high'].idxmax()
+        else:
+            peak2_idx = df_window_data.loc[(peak1_idx + distance) :, 'max_high'].idxmax()
+        return df_window_data.loc[peak2_idx, 'true_index']
+
+
+    def find_second_bottom(self, window_data, distance):
+        true_index = pd.Series(window_data.index.copy(), name='true_index')
+        min_low = pd.Series(window_data.values.copy(), name='min_low')
+        df_window_data = pd.DataFrame({'true_index': true_index, 'min_low': min_low})
+
+        bottom1_idx = df_window_data.min_low.idxmin()
+        if bottom1_idx + distance >= len(df_window_data):    
+            bottom2_idx = df_window_data.loc[: (bottom1_idx - distance + 1), 'min_low'].idxmin()
+        else:
+            bottom2_idx = df_window_data.loc[(bottom1_idx + distance) :, 'min_low'].idxmin()
+        return df_window_data.loc[bottom2_idx, 'true_index']
+
+
+    def upper_trendlines(self, dataframe: pd.DataFrame, slicing_window=100, distance=50):
         """
-        Called at the start of the bot iteration (one loop).
-        Might be used to perform pair-independent tasks
-        (e.g. gather some remote ressource for comparison)
+        Return a Pandas dataframe with resistance lines.
 
-        For full documentation please go to https://www.freqtrade.io/en/latest/strategy-advanced/
-
-        When not implemented by a strategy, this simply does nothing.
-        :param current_time: datetime object, containing the current datetime
-        :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
+        :param dataframe: incoming data matrix
+        :param slicing_window: number of candles for slicing window
+        :param distance: Number of candles between two maximum points
         """
-        pass
+        dataframe['peak1_idx'] = dataframe['max_high'].rolling(window=slicing_window).apply(lambda x: x.idxmax())
 
-    def custom_entry_price(self, pair: str, trade: Optional['Trade'],
-                           current_time: 'datetime', proposed_rate: float,
-                           entry_tag: 'Optional[str]', side: str, **kwargs) -> float:
+        dataframe['peak2_idx'] = dataframe['max_high'].rolling(window=slicing_window).apply(find_second_peak, args=(distance, ))
+    
+        dataframe['maxslope'] = None
+        dataframe.loc[dataframe['peak1_idx'][slicing_window - 1:].index, 'maxslope'] = (np.array(dataframe.loc[dataframe['peak1_idx'][slicing_window - 1:].astype(int), 'max_high']) - 
+                                                    np.array(dataframe.loc[dataframe['peak2_idx'][slicing_window - 1:].astype(int), 'max_high'])) / (np.array(dataframe['peak1_idx'][slicing_window - 1:]) - 
+                                                                                                                                                np.array(dataframe['peak2_idx'][slicing_window - 1:])) # Slope between max points
+        
+        dataframe['max_y_intercept'] = None
+        dataframe.loc[dataframe['peak1_idx'][slicing_window - 1:].index, 'max_y_intercept'] = (np.array(dataframe.loc[dataframe['peak1_idx'][slicing_window - 1:].astype(int), 'max_high']) - 
+                                                            np.array(dataframe.loc[dataframe['peak1_idx'][slicing_window - 1:].index, 'maxslope']) * np.array(dataframe['peak1_idx'][slicing_window - 1:])) # y-intercept for upper trendline
+
+        return dataframe
+
+
+    def lower_trendlines(self, dataframe: pd.DataFrame, slicing_window=100, distance=50):
         """
-        Custom entry price logic, returning the new entry price.
+        Return a Pandas dataframe with support lines.
 
-        For full documentation please go to https://www.freqtrade.io/en/latest/strategy-advanced/
-
-        When not implemented by a strategy, returns None, orderbook is used to set entry price
-
-        :param pair: Pair that's currently analyzed
-        :param trade: trade object (None for initial entries).
-        :param current_time: datetime object, containing the current datetime
-        :param proposed_rate: Rate, calculated based on pricing settings in exit_pricing.
-        :param entry_tag: Optional entry_tag (buy_tag) if provided with the buy signal.
-        :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
-        :return float: New entry price value if provided
+        :param dataframe: incoming data matrix
+        :param slicing_window: number of candles for slicing window
+        :param distance: Number of candles between two minimum points
         """
-        return proposed_rate
+        # print(dataframe)
+        dataframe['bottom1_idx'] = dataframe['min_low'].rolling(window=slicing_window).apply(lambda x: x.idxmin())
 
-    def adjust_entry_price(self, trade: 'Trade', order: 'Optional[Order]', pair: str,
-                            current_time: datetime, proposed_rate: float, current_order_rate: float,
-                            entry_tag: Optional[str], side: str, **kwargs) -> float:
+        dataframe['bottom2_idx'] = dataframe['min_low'].rolling(window=slicing_window).apply(find_second_bottom, args=(distance, ))
+    
+        dataframe['minslope'] = None
+        dataframe.loc[dataframe['bottom1_idx'][slicing_window - 1:].index, 'minslope'] = (np.array(dataframe.loc[dataframe['bottom1_idx'][slicing_window - 1:].astype(int), 'min_low']) - 
+                                                    np.array(dataframe.loc[dataframe['bottom2_idx'][slicing_window - 1:].astype(int), 'min_low'])) / (np.array(dataframe['bottom1_idx'][slicing_window - 1:]) - 
+                                                                                                                                                np.array(dataframe['bottom2_idx'][slicing_window - 1:])) # Slope between min points
+        
+        dataframe['min_y_intercept'] = None
+        
+        dataframe.loc[dataframe['bottom1_idx'][slicing_window - 1:].index, 'min_y_intercept'] = (np.array(dataframe.loc[dataframe['bottom1_idx'][slicing_window - 1:].astype(int), 'min_low']) - 
+                                                            np.array(dataframe.loc[dataframe['bottom1_idx'][slicing_window - 1:].index, 'minslope']) * np.array(dataframe['bottom1_idx'][slicing_window - 1:])) # y-intercept for lower trendline
+        
+        return dataframe
+
+
+    def process_data(self, dataframe, number_candle_to_process=1):
+        
+        """    
+        STEP 1: Tìm ra các nến có data format "x:00:00+00:00"
         """
-        Entry price re-adjustment logic, returning the user desired limit price.
-        This only executes when a order was already placed, still open (unfilled fully or partially)
-        and not timed out on subsequent candles after entry trigger.
-
-        For full documentation please go to https://www.freqtrade.io/en/latest/strategy-callbacks/
-
-        When not implemented by a strategy, returns current_order_rate as default.
-        If current_order_rate is returned then the existing order is maintained.
-        If None is returned then order gets canceled but not replaced by a new one.
-
-        :param pair: Pair that's currently analyzed
-        :param trade: Trade object.
-        :param order: Order object
-        :param current_time: datetime object, containing the current datetime
-        :param proposed_rate: Rate, calculated based on pricing settings in entry_pricing.
-        :param current_order_rate: Rate of the existing order in place.
-        :param entry_tag: Optional entry_tag (buy_tag) if provided with the buy signal.
-        :param side: 'long' or 'short' - indicating the direction of the proposed trade
-        :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
-        :return float: New entry price value if provided
+        dataframe['date'] = pd.to_datetime(dataframe['date'], format='%Y-%m-%d %H:%M:%S%z')
+        dataframe['start_candle'] = dataframe['date'].dt.minute == 0
+        start_candle = dataframe[dataframe['start_candle']].index
 
         """
-        return current_order_rate
-
-    def custom_exit_price(self, pair: str, trade: 'Trade',
-                          current_time: 'datetime', proposed_rate: float,
-                          current_profit: float, exit_tag: Optional[str], **kwargs) -> float:
+        STEP 2: Lọc ra các vị trí nến có đủ number_candle_to_process nến đằng sau
         """
-        Custom exit price logic, returning the new exit price.
+        qualified_start_candle = start_candle[start_candle + number_candle_to_process <= len(dataframe)]
+        dataframe['qualified_start_candle'] = False
+        dataframe.loc[qualified_start_candle, 'qualified_start_candle'] = True
 
-        For full documentation please go to https://www.freqtrade.io/en/latest/strategy-advanced/
-
-        When not implemented by a strategy, returns None, orderbook is used to set exit price
-
-        :param pair: Pair that's currently analyzed
-        :param trade: trade object.
-        :param current_time: datetime object, containing the current datetime
-        :param proposed_rate: Rate, calculated based on pricing settings in exit_pricing.
-        :param current_profit: Current profit (as ratio), calculated based on current_rate.
-        :param exit_tag: Exit reason.
-        :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
-        :return float: New exit price value if provided
         """
-        return proposed_rate
-
-    def custom_stake_amount(self, pair: str, current_time: datetime, current_rate: float,
-                            proposed_stake: float, min_stake: Optional[float], max_stake: float,
-                            leverage: float, entry_tag: Optional[str], side: str,
-                            **kwargs) -> float:
+        STEP 3: Tìm ra các max high và min low theo từng cụm 12 nến tình từ vị trí nến bắt đầu
         """
-        Customize stake size for each new trade.
+        max_of_high_prices = dataframe['high'].rolling(window=number_candle_to_process, min_periods=1).max().shift(-(number_candle_to_process - 1)).loc[qualified_start_candle]
+        max_indices_of_high_prices  = dataframe['high'].rolling(window=number_candle_to_process, min_periods=1).apply(lambda x: x.idxmax()).shift(-(number_candle_to_process - 1)).loc[qualified_start_candle].astype(int)
 
-        :param pair: Pair that's currently analyzed
-        :param current_time: datetime object, containing the current datetime
-        :param current_rate: Rate, calculated based on pricing settings in exit_pricing.
-        :param proposed_stake: A stake amount proposed by the bot.
-        :param min_stake: Minimal stake size allowed by exchange.
-        :param max_stake: Balance available for trading.
-        :param leverage: Leverage selected for this trade.
-        :param entry_tag: Optional entry_tag (buy_tag) if provided with the buy signal.
-        :param side: 'long' or 'short' - indicating the direction of the proposed trade
-        :return: A stake size, which is between min_stake and max_stake.
-        """
-        return proposed_stake
+        min_of_low_prices = dataframe['low'].rolling(window=number_candle_to_process, min_periods=1).min().shift(-(number_candle_to_process - 1)).loc[qualified_start_candle]
+        min_indices_of_low_prices = dataframe['low'].rolling(window=number_candle_to_process, min_periods=1).apply(lambda x: x.idxmin()).shift(-(number_candle_to_process - 1)).loc[qualified_start_candle].astype(int)
+    
+        return max_of_high_prices, max_indices_of_high_prices, min_of_low_prices, min_indices_of_low_prices
+    
+    def supports_and_resistances(self, dataframe, rollsize, field_for_support='low', field_for_resistance='high'): 
+        diffs1 = abs(dataframe['high'].diff().abs().iloc[1:]) 
 
-    use_custom_stoploss = True
+        diffs2 = abs(dataframe['low'].diff().abs().iloc[1:]) 
 
-    def custom_stoploss(self, pair: str, trade: 'Trade', current_time: 'datetime', current_rate: float,
-                        current_profit: float, after_fill: bool, **kwargs) -> float:
-        """
-        Custom stoploss logic, returning the new distance relative to current_rate (as ratio).
-        e.g. returning -0.05 would create a stoploss 5% below current_rate.
-        The custom stoploss can never be below self.stoploss, which serves as a hard maximum loss.
 
-        For full documentation please go to https://www.freqtrade.io/en/latest/strategy-advanced/
+        mean_deviation_ressistance = diffs1.mean() 
 
-        When not implemented by a strategy, returns the initial stoploss value.
-        Only called when use_custom_stoploss is set to True.
+        mean_deviation_support = diffs2.mean() 
+        supports = dataframe[dataframe.low == dataframe[field_for_support].rolling(rollsize, center=True).min()].low 
+        resistances = dataframe[dataframe.high == dataframe[field_for_resistance].rolling(rollsize, center=True).max()].high 
+        supports = supports[abs(supports.diff()) > mean_deviation_support] 
+        resistances = resistances[abs(resistances.diff()) > mean_deviation_ressistance] 
+        return supports,resistances 
+    def mean_absolute_deviation(self, dataframe):
+        diffs1 = abs(dataframe['high'].diff().abs().iloc[1:])
+        diffs2 = abs(dataframe['low'].diff().abs().iloc[1:])
+        
+        mean_deviation1 = diffs1.mean()
+        mean_deviation2 = diffs2.mean()
 
-        :param pair: Pair that's currently analyzed
-        :param trade: trade object.
-        :param current_time: datetime object, containing the current datetime
-        :param current_rate: Rate, calculated based on pricing settings in exit_pricing.
-        :param current_profit: Current profit (as ratio), calculated based on current_rate.
-        :param after_fill: True if the stoploss is called after the order was filled.
-        :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
-        :return float: New stoploss value, relative to the current_rate
-        """
-
-    def custom_exit(self, pair: str, trade: 'Trade', current_time: 'datetime', current_rate: float,
-                    current_profit: float, **kwargs) -> 'Optional[Union[str, bool]]':
-        """
-        Custom exit signal logic indicating that specified position should be sold. Returning a
-        string or True from this method is equal to setting sell signal on a candle at specified
-        time. This method is not called when sell signal is set.
-
-        This method should be overridden to create sell signals that depend on trade parameters. For
-        example you could implement a sell relative to the candle when the trade was opened,
-        or a custom 1:2 risk-reward ROI.
-
-        Custom exit reason max length is 64. Exceeding characters will be removed.
-
-        :param pair: Pair that's currently analyzed
-        :param trade: trade object.
-        :param current_time: datetime object, containing the current datetime
-        :param current_rate: Rate, calculated based on pricing settings in exit_pricing.
-        :param current_profit: Current profit (as ratio), calculated based on current_rate.
-        :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
-        :return: To execute sell, return a string with custom exit reason or True. Otherwise return
-        None or False.
-        """
-        return None
-
-    def confirm_trade_entry(self, pair: str, order_type: str, amount: float, rate: float,
-                            time_in_force: str, current_time: datetime, entry_tag: Optional[str],
-                            side: str, **kwargs) -> bool:
-        """
-        Called right before placing a entry order.
-        Timing for this function is critical, so avoid doing heavy computations or
-        network requests in this method.
-
-        For full documentation please go to https://www.freqtrade.io/en/latest/strategy-advanced/
-
-        When not implemented by a strategy, returns True (always confirming).
-
-        :param pair: Pair that's about to be bought/shorted.
-        :param order_type: Order type (as configured in order_types). usually limit or market.
-        :param amount: Amount in target (base) currency that's going to be traded.
-        :param rate: Rate that's going to be used when using limit orders
-                     or current rate for market orders.
-        :param time_in_force: Time in force. Defaults to GTC (Good-til-cancelled).
-        :param current_time: datetime object, containing the current datetime
-        :param entry_tag: Optional entry_tag (buy_tag) if provided with the buy signal.
-        :param side: 'long' or 'short' - indicating the direction of the proposed trade
-        :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
-        :return bool: When True is returned, then the buy-order is placed on the exchange.
-            False aborts the process
-        """
-        return True
-
-    def confirm_trade_exit(self, pair: str, trade: 'Trade', order_type: str, amount: float,
-                           rate: float, time_in_force: str, exit_reason: str,
-                           current_time: 'datetime', **kwargs) -> bool:
-        """
-        Called right before placing a regular exit order.
-        Timing for this function is critical, so avoid doing heavy computations or
-        network requests in this method.
-
-        For full documentation please go to https://www.freqtrade.io/en/latest/strategy-advanced/
-
-        When not implemented by a strategy, returns True (always confirming).
-
-        :param pair: Pair for trade that's about to be exited.
-        :param trade: trade object.
-        :param order_type: Order type (as configured in order_types). usually limit or market.
-        :param amount: Amount in base currency.
-        :param rate: Rate that's going to be used when using limit orders
-                     or current rate for market orders.
-        :param time_in_force: Time in force. Defaults to GTC (Good-til-cancelled).
-        :param exit_reason: Exit reason.
-            Can be any of ['roi', 'stop_loss', 'stoploss_on_exchange', 'trailing_stop_loss',
-                            'exit_signal', 'force_exit', 'emergency_exit']
-        :param current_time: datetime object, containing the current datetime
-        :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
-        :return bool: When True, then the exit-order is placed on the exchange.
-            False aborts the process
-        """
-        return True
-
-    def check_entry_timeout(self, pair: str, trade: 'Trade', order: 'Order',
-                            current_time: datetime, **kwargs) -> bool:
-        """
-        Check entry timeout function callback.
-        This method can be used to override the entry-timeout.
-        It is called whenever a limit entry order has been created,
-        and is not yet fully filled.
-        Configuration options in `unfilledtimeout` will be verified before this,
-        so ensure to set these timeouts high enough.
-
-        For full documentation please go to https://www.freqtrade.io/en/latest/strategy-advanced/
-
-        When not implemented by a strategy, this simply returns False.
-        :param pair: Pair the trade is for
-        :param trade: Trade object.
-        :param order: Order object.
-        :param current_time: datetime object, containing the current datetime
-        :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
-        :return bool: When True is returned, then the entry order is cancelled.
-        """
-        return False
-
-    def check_exit_timeout(self, pair: str, trade: 'Trade', order: 'Order',
-                           current_time: datetime, **kwargs) -> bool:
-        """
-        Check exit timeout function callback.
-        This method can be used to override the exit-timeout.
-        It is called whenever a limit exit order has been created,
-        and is not yet fully filled.
-        Configuration options in `unfilledtimeout` will be verified before this,
-        so ensure to set these timeouts high enough.
-
-        For full documentation please go to https://www.freqtrade.io/en/latest/strategy-advanced/
-
-        When not implemented by a strategy, this simply returns False.
-        :param pair: Pair the trade is for
-        :param trade: Trade object.
-        :param order: Order object.
-        :param current_time: datetime object, containing the current datetime
-        :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
-        :return bool: When True is returned, then the exit-order is cancelled.
-        """
-        return False
-
-    def adjust_trade_position(self, trade: 'Trade', current_time: datetime,
-                              current_rate: float, current_profit: float,
-                              min_stake: Optional[float], max_stake: float,
-                              current_entry_rate: float, current_exit_rate: float,
-                              current_entry_profit: float, current_exit_profit: float,
-                              **kwargs) -> Optional[float]:
-        """
-        Custom trade adjustment logic, returning the stake amount that a trade should be
-        increased or decreased.
-        This means extra entry or exit orders with additional fees.
-        Only called when `position_adjustment_enable` is set to True.
-
-        For full documentation please go to https://www.freqtrade.io/en/latest/strategy-advanced/
-
-        When not implemented by a strategy, returns None
-
-        :param trade: trade object.
-        :param current_time: datetime object, containing the current datetime
-        :param current_rate: Current entry rate (same as current_entry_profit)
-        :param current_profit: Current profit (as ratio), calculated based on current_rate
-                                (same as current_entry_profit).
-        :param min_stake: Minimal stake size allowed by exchange (for both entries and exits)
-        :param max_stake: Maximum stake allowed (either through balance, or by exchange limits).
-        :param current_entry_rate: Current rate using entry pricing.
-        :param current_exit_rate: Current rate using exit pricing.
-        :param current_entry_profit: Current profit using entry pricing.
-        :param current_exit_profit: Current profit using exit pricing.
-        :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
-        :return float: Stake amount to adjust your trade,
-                       Positive values to increase position, Negative values to decrease position.
-                       Return None for no action.
-        """
-        return None
-
-    def leverage(self, pair: str, current_time: datetime, current_rate: float,
-                 proposed_leverage: float, max_leverage: float, entry_tag: Optional[str],
-                 side: str, **kwargs) -> float:
-        """
-        Customize leverage for each new trade. This method is only called in futures mode.
-
-        :param pair: Pair that's currently analyzed
-        :param current_time: datetime object, containing the current datetime
-        :param current_rate: Rate, calculated based on pricing settings in exit_pricing.
-        :param proposed_leverage: A leverage proposed by the bot.
-        :param max_leverage: Max leverage allowed on this pair
-        :param entry_tag: Optional entry_tag (buy_tag) if provided with the buy signal.
-        :param side: 'long' or 'short' - indicating the direction of the proposed trade
-        :return: A leverage amount, which is between 1.0 and max_leverage.
-        """
-        return 1.0
+        return min(mean_deviation1,mean_deviation2)
