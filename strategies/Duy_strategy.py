@@ -18,7 +18,7 @@ import pandas_ta as pta
 from technical import qtpylib
 
 
-class Duy_startegy(IStrategy):
+class Duy_strategy(IStrategy):
     """
     This is a strategy template to get you started.
     More information in https://www.freqtrade.io/en/latest/strategy-customization/
@@ -51,32 +51,22 @@ class Duy_startegy(IStrategy):
         "0": 1
     }
 
-    # Optimal stoploss designed for the strategy.
-    # This attribute will be overridden if the config file contains "stoploss".
-    stoploss = -0.10
+    stoploss = -0.5
 
     # Trailing stoploss
     trailing_stop = False
-    # trailing_only_offset_is_reached = False
-    # trailing_stop_positive = 0.01
-    # trailing_stop_positive_offset = 0.0  # Disabled / not configured
 
     # Run "populate_indicators()" only for new candle.
     process_only_new_candles = True
 
     # These values can be overridden in the config.
     use_exit_signal = True
-    exit_profit_only = True
+    exit_profit_only = False
     ignore_roi_if_entry_signal = False
 
     # Number of candles the strategy requires before producing valid signals
-    startup_candle_count: int = 100
+    startup_candle_count: int = 400
 
-    """
-    # Strategy parameters
-    buy_rsi = IntParameter(10, 40, default=30, space="buy")
-    sell_rsi = IntParameter(60, 90, default=70, space="sell")
-    """
 
     # Optional order type mapping.
     order_types = {
@@ -86,11 +76,13 @@ class Duy_startegy(IStrategy):
         'stoploss_on_exchange': False
     }
 
+
     # Optional order time in force.
     order_time_in_force = {
         'entry': 'GTC',
         'exit': 'GTC'
     }
+
 
     def informative_pairs(self):
         """
@@ -103,7 +95,9 @@ class Duy_startegy(IStrategy):
                             ("BTC/USDT", "15m"),
                             ]
         """
-        return ["BTC/USDT", "1h"]
+        return [
+            ("BTC/USDT:USDT", "1h")
+        ]
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
@@ -121,26 +115,28 @@ class Duy_startegy(IStrategy):
             # Don't do anything if DataProvider is not available.
             return dataframe
 
+        """
+        - Parameters used for populate indicators
+        """
+        # Find lower & upper trendlines 
+        slicing_window_size = 50
+        distance = 25
+
+        # Find supports/resistance and bottom/peak
+        rollsize = 20
+
         #### TREND ####
         inf_tf = '1h'
         informative = self.dp.get_pair_dataframe(pair=metadata['pair'], timeframe=inf_tf)    
         # Get the 200 hour EMA
         informative['ema200'] = ta.EMA(informative, timeperiod=200)
         
-        # Use the helper function merge_informative_pair to safely merge the pair
-        # Automatically renames the columns and merges a shorter timeframe dataframe and a longer timeframe informative pair
-        # use ffill to have the 1d value available in every row throughout the day.
-        # Without this, comparisons between columns of the original and the informative pair would only work once per day
         dataframe = merge_informative_pair(dataframe, informative, self.timeframe, inf_tf, ffill=True)
 
         #### AREA OF VALUE & ENTRY TRIGER ####
         # Tìm ra các điểm max, min theo từng cụm 12 nến
         max_of_high_prices, max_indices_of_high_prices, min_of_low_prices, min_indices_of_low_prices = self.process_data(dataframe, number_candle_to_process=12)
         
-        # Find lower & upper trendlines dựa trên các indices của max high và min low tìm được 
-        slicing_window_size = 50
-        distance = 25
-
         # Upper trendline
         max_values_dataframe = pd.DataFrame(data=max_of_high_prices.values, index=max_indices_of_high_prices, columns=['max_high'])
         max_values_dataframe = self.upper_trendlines(dataframe=max_values_dataframe, slicing_window=slicing_window_size, distance=distance)
@@ -168,25 +164,26 @@ class Duy_startegy(IStrategy):
         # Apply the function to each group and concatenate the results
         dataframe = grouped.apply(self.fill_non_none).reset_index(drop=True)
 
-        # Detect resistances and supports
-        thresold = self.mean_absolute_deviation(dataframe)
-        supports, resistances = self.supports_and_resistances(dataframe, 50, field_for_support='low', field_for_resistance='high')
-        dataframe['Support'] = None
-        dataframe.loc[supports.index, "Support"] = supports.values
-        dataframe['Resistance'] = None
-        dataframe.loc[resistances.index, "Resistance"] = resistances.values
-        
         # Shift values of maxslope, minslope, max_y_intercept, min_y_intercept of previous hour to prior hour
         dataframe['previous_maxslope'] = dataframe['maxslope'].shift(12)
         dataframe['previous_minslope'] = dataframe['minslope'].shift(12)
         dataframe['previous_max_y_intercept'] = dataframe['max_y_intercept'].shift(12)
         dataframe['previous_min_y_intercept'] = dataframe['min_y_intercept'].shift(12)
 
+        # Detect resistances and supports
+        supports, resistances = self.supports_and_resistances(dataframe, rollsize, field_for_support='low', field_for_resistance='high')
+        dataframe['Support'] = None
+        dataframe.loc[supports.index, "Support"] = supports.values
+        dataframe['Resistance'] = None
+        dataframe.loc[resistances.index, "Resistance"] = resistances.values
+        
+ 
         # Xét từng nến để tìm các đỉnh/đáy, vùng kháng cự/ hỗ trợ gần nhất
-        dataframe['nearest_support'] = None
-        dataframe['nearest_resistance'] = None
-        dataframe['nearest_peak'] = None
-        dataframe['nearest_bottom'] = None
+        dataframe['nearest_support'] = -1
+        dataframe['nearest_resistance'] = -1
+        dataframe['nearest_peak'] = -1
+        dataframe['nearest_bottom'] = -1
+
 
         # Duyệt qua từng hàng trong DataFrame
         for i in range(len(dataframe)):
@@ -194,13 +191,11 @@ class Duy_startegy(IStrategy):
             # Lấy giá đóng cửa của nến hiện tại
             close_price = dataframe.loc[i, 'close']
 
-
             # Tìm chỉ số (indice) của mức hỗ trợ và mức kháng cự gần nhất
             nearest_bottom = supports[supports.index < i]
             if len(nearest_bottom) != 0:
                 dataframe.loc[i, 'nearest_bottom'] = nearest_bottom[nearest_bottom.index.max()]
 
-            
             nearest_peak = resistances[resistances.index < i]
             if len(nearest_peak) != 0:
                 dataframe.loc[i, 'nearest_peak'] = nearest_peak[nearest_peak.index.max()]
@@ -211,27 +206,17 @@ class Duy_startegy(IStrategy):
             if not pd.isna(nearest_support_index):
                 dataframe.loc[i, 'nearest_support'] = nearest_bottom[nearest_support_index]
             
-
             # Tìm mức kháng cự gần nhất (lớn hơn giá đóng cửa của nến)
             nearest_resistance_index = nearest_peak[nearest_peak.values > close_price].index.max()
             if not pd.isna(nearest_resistance_index):
                 dataframe.loc[i, 'nearest_resistance'] = nearest_peak[nearest_resistance_index]
+        
 
         # Xét từng nến để tìm các đỉnh/đáy, vùng kháng cự/ hỗ trợ gần nhất
         dataframe['previous_nearest_support'] = dataframe['nearest_support'].shift(1)
         dataframe['previous_nearest_resistance'] = dataframe['nearest_resistance'].shift(1)
         dataframe['previous_nearest_peak'] = dataframe['nearest_peak'].shift(1)
         dataframe['previous_nearest_bottom'] = dataframe['nearest_bottom'].shift(1)
-        # Retrieve best bid and best ask from the orderbook
-        # ------------------------------------
-        """
-        # first check if dataprovider is available
-        if self.dp:
-            if self.dp.runmode.value in ('live', 'dry_run'):
-                ob = self.dp.orderbook(metadata['pair'], 1)
-                dataframe['best_bid'] = ob['bids'][0][0]
-                dataframe['best_ask'] = ob['asks'][0][0]
-        """
 
         return dataframe
 
@@ -247,10 +232,12 @@ class Duy_startegy(IStrategy):
                 (
                     dataframe['close'] > dataframe['previous_maxslope'] * dataframe['close'].index + dataframe['previous_max_y_intercept']
                 ) &
-                (   dataframe['close_1h'] > dataframe['ema200_1h']) 
+                (   
+                    dataframe['close_1h'] > dataframe['ema200_1h']
+                ) 
             ),
-            'enter_long',
-        ] = 1
+            ['enter_long', 'enter_tag']
+        ] = (1, 'enter_long')
         
         
         dataframe.loc[
@@ -258,10 +245,12 @@ class Duy_startegy(IStrategy):
                 (
                     dataframe['close'] < dataframe['previous_minslope'] * dataframe['close'].index + dataframe['previous_min_y_intercept']
                 ) &
-                (   dataframe['close_1h'] < dataframe['ema200_1h']) 
+                (   
+                    dataframe['close_1h'] < dataframe['ema200_1h']
+                ) 
             ),
-            "enter_short",
-        ] = 1
+            ['enter_short', 'enter_tag']
+        ] = (1, 'enter_short')
 
         return dataframe
 
@@ -272,29 +261,48 @@ class Duy_startegy(IStrategy):
         :param metadata: Additional information, like the currently traded pair
         :return: DataFrame with exit columns populated
         """
-
         dataframe.loc[
             (
                 (
-                    dataframe['close'] >= dataframe['previous_nearest_resistance']
-                ) | 
+                    dataframe['previous_nearest_resistance'] != -1
+                ) &
                 (
-                    dataframe['close'] <= dataframe['previous_bottom']
-                ) 
+                    dataframe['previous_nearest_bottom'] != -1
+                ) &
+                (
+                    (
+                        dataframe['close'] >= dataframe['previous_nearest_resistance']
+                    ) | 
+                    (
+                        dataframe['close'] <= dataframe['previous_nearest_bottom']
+                    ) 
+                )
             ),
-            'exit_long'] = 1
-        # Uncomment to use shorts (Only used in futures/margin mode. Check the documentation for more info)
+            ['exit_long', 'exit_tag']
+        ] = (1, 'exit_long')
+       
         dataframe.loc[
             (
                 (
-                    dataframe['close'] <= dataframe['previous_nearest_support'] 
-                ) | 
-                (   
-                    dataframe['close'] >= dataframe['previous_peak']
-                ) 
+                    dataframe['previous_nearest_support'] != -1
+                ) &
+                (
+                    dataframe['previous_nearest_peak'] != -1
+                ) &
+                ( 
+                    (
+                        dataframe['close'] <= dataframe['previous_nearest_support'] 
+                    ) | 
+                    (   
+                        dataframe['close'] >= dataframe['previous_nearest_peak']
+                    ) 
+                )
             ),
-            'exit_short'] = 1
+            ['exit_short', 'exit_tag']
+        ] = (1, 'exit_short')
         
+        dataframe.to_csv('/home/duchao/freqtrade/user_data/strategies/Duy_exit_trend_4days.csv')
+
         return dataframe
     
     """
@@ -352,7 +360,7 @@ class Duy_startegy(IStrategy):
         """
         dataframe['peak1_idx'] = dataframe['max_high'].rolling(window=slicing_window).apply(lambda x: x.idxmax())
 
-        dataframe['peak2_idx'] = dataframe['max_high'].rolling(window=slicing_window).apply(find_second_peak, args=(distance, ))
+        dataframe['peak2_idx'] = dataframe['max_high'].rolling(window=slicing_window).apply(self.find_second_peak, args=(distance, ))
     
         dataframe['maxslope'] = None
         dataframe.loc[dataframe['peak1_idx'][slicing_window - 1:].index, 'maxslope'] = (np.array(dataframe.loc[dataframe['peak1_idx'][slicing_window - 1:].astype(int), 'max_high']) - 
@@ -377,7 +385,7 @@ class Duy_startegy(IStrategy):
         # print(dataframe)
         dataframe['bottom1_idx'] = dataframe['min_low'].rolling(window=slicing_window).apply(lambda x: x.idxmin())
 
-        dataframe['bottom2_idx'] = dataframe['min_low'].rolling(window=slicing_window).apply(find_second_bottom, args=(distance, ))
+        dataframe['bottom2_idx'] = dataframe['min_low'].rolling(window=slicing_window).apply(self.find_second_bottom, args=(distance, ))
     
         dataframe['minslope'] = None
         dataframe.loc[dataframe['bottom1_idx'][slicing_window - 1:].index, 'minslope'] = (np.array(dataframe.loc[dataframe['bottom1_idx'][slicing_window - 1:].astype(int), 'min_low']) - 
@@ -433,11 +441,3 @@ class Duy_startegy(IStrategy):
         supports = supports[abs(supports.diff()) > mean_deviation_support] 
         resistances = resistances[abs(resistances.diff()) > mean_deviation_ressistance] 
         return supports,resistances 
-    def mean_absolute_deviation(self, dataframe):
-        diffs1 = abs(dataframe['high'].diff().abs().iloc[1:])
-        diffs2 = abs(dataframe['low'].diff().abs().iloc[1:])
-        
-        mean_deviation1 = diffs1.mean()
-        mean_deviation2 = diffs2.mean()
-
-        return min(mean_deviation1,mean_deviation2)
